@@ -2,8 +2,9 @@
 Deuxième méthode de modification des frontières belges : modification des coordonnées des sommets des polygones belges et leur affectant les coordonnées du plus proche point de la frontière française.
 
 Méthode :
-	1. Création d'une table de points temporaire
-	2. Insertion des coordonnées des sommets des municipalités belges et des communes françaises dans la table temporaire sous forme de point
+	1. Création d'une table de points temporaire ;
+	2. Insertion des coordonnées des sommets des municipalités belges et des communes françaises dans la table temporaire sous forme de point ;
+    3. Mise à jour de la géométrie et du fid_closest_point des points belges avec les infos des plus proches points français ;
 */
 
 -- 1. Création d'une table de points temporaire
@@ -135,3 +136,124 @@ BEGIN
     COMMIT;
 END;
 
+/
+
+--3. Mise à jour de la géométrie et du fid_closest_point des points belges avec les infos des plus proches points français.
+SET SERVEROUTPUT ON
+DECLARE
+    CURSOR C_1 IS
+    WITH
+    -- Fusion des 90 communes actuelles de la MEL - L. 5   
+    v_regroupement AS (
+    SELECT
+        SDO_AGGR_UNION(
+            SDOAGGRTYPE(a.geom, 0.001)
+        ) AS geom
+    FROM
+        ta_test_limites_communes a
+    WHERE
+        a.geom IS NOT NULL
+        AND a.fid_source = 3
+    ),
+    
+    -- Buffer de chaque municipalité à ajouter - L. 18
+    v_buffer_6com AS (
+    SELECT
+        a.nom,
+        SDO_GEOM.SDO_BUFFER(a.geom, 50, 0.001) AS geom
+    FROM
+        ta_test_limites_communes a
+    WHERE
+        a.geom IS NOT NULL
+        AND a.fid_source = 25
+    ),
+
+-- Suppression des arcs pouvant occasionner des décalages entre la France et la Belgique - L. 30
+    v_correction_arcs_v1 AS (
+    SELECT
+        a.nom,
+        SDO_GEOM.SDO_ARC_DENSIFY(a.geom, 0.001, 'arc_tolerance = 0.005') AS geom
+    FROM
+        v_buffer_6com a
+    ),   
+
+-- Buffer de 90 communes actuelles de la MEL - L. 39    
+    v_buffer_90com AS(
+        SELECT
+            SDO_GEOM.SDO_BUFFER(a.geom, 50, 0.001) AS geom
+        FROM
+            v_regroupement a
+    ),
+    
+-- Suppression des arcs pouvant occasionner des décalages entre la France et la Belgique - L. 47
+    v_correction_arcs_v2 AS (
+    SELECT
+        SDO_GEOM.SDO_ARC_DENSIFY(a.geom, 0.001, 'arc_tolerance = 0.005') AS geom
+    FROM
+        v_buffer_90com a
+    ), 
+    
+-- Intersection entre les deux buffers afin d'avoir uniquement les parties à ajouter aux nouvelles communes de la MEL - L. 55    
+    v_intersection AS(
+        SELECT
+            a.nom,
+            SDO_GEOM.SDO_INTERSECTION(a.geom, b.geom, 0.001) AS geom
+        FROM
+            v_correction_arcs_v1 a,
+            v_correction_arcs_v2 b
+    )
+    
+    SELECT
+        a.objectid,
+        a.geom
+    FROM
+        ta_test_points a,
+        v_intersection b
+    WHERE
+        a.fid_source = 25
+        AND a.fid_polygone = 44
+        AND SDO_RELATE(a.geom, b.geom, 'mask = anyinteract') = 'TRUE';
+
+    v_point MDSYS.SDO_GEOMETRY;
+    v_id_point NUMBER;
+    v_test MDSYS.SDO_GEOMETRY;
+    dist NUMBER;
+    geoma MDSYS.SDO_GEOMETRY;
+    geomb MDSYS.SDO_GEOMETRY;
+    v_closest_point NUMBER;
+    v_geom_closest MDSYS.SDO_GEOMETRY;
+
+BEGIN
+
+    OPEN C_1;
+    LOOP
+        FETCH C_1 INTO v_id_point, v_point;
+        EXIT WHEN C_1%NOTFOUND; --Pour chaque point de Comines-Warneton on sélectionne le plus proche point dont le fid_source est 3 et qui se situe dans un rayon de 30m autour du point de Comines-Warneton.
+        
+        SELECT SDO_AGGR_UNION(
+                    SDOAGGRTYPE(a.geom, 0.001)
+                ) INTO v_test
+        FROM
+            ta_test_points a,
+            ta_test_points b
+        WHERE
+            b.objectid = v_id_point
+            AND a.fid_source = 3
+            AND SDO_WITHIN_DISTANCE(b.geom, a.geom, 'distance = 30') = 'TRUE';
+    
+        SDO_GEOM.SDO_CLOSEST_POINTS(v_point, v_test, 0.005, NULL, dist, geoma, geomb);
+        
+        IF geomb IS NOT NULL THEN
+            SELECT a.objectid INTO v_closest_point FROM ta_test_points a WHERE SDO_RELATE(a.geom, geomb, 'mask = equal') = 'TRUE';
+            UPDATE ta_test_points SET fid_closest_point = v_closest_point WHERE objectid = v_id_point;
+            COMMIT;
+            SELECT a.geom INTO v_geom_closest FROM ta_test_points a WHERE a.objectid = v_closest_point;
+            UPDATE ta_test_points SET geom = v_geom_closest WHERE objectid = v_id_point;
+        /*INSERT INTO TA_TEST_POINTS (fid_closest_point, geom)
+        VALUES(2, geomb);*/
+       END IF;
+            
+    END LOOP;
+    CLOSE C_1;
+    COMMIT;
+END;
