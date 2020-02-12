@@ -3,8 +3,12 @@ Deuxième méthode de modification des frontières belges : modification des coo
 
 Méthode :
 	1. Création d'une table de points temporaire ;
+
 	2. Insertion des coordonnées des sommets des municipalités belges et des communes françaises dans la table temporaire sous forme de point ;
-    3. Mise à jour de la géométrie et du fid_closest_point des points belges avec les infos des plus proches points français ;
+
+    3. Suppression des points français situés en-dehors de la frontière avec la Belgique dans un rayon de 50m autour de cette dernière;
+
+    4. Mise à jour de la géométrie et du fid_closest_point des points belges avec les infos des plus proches points français ;
 */
 
 -- 1. Création d'une table de points temporaire
@@ -104,7 +108,7 @@ END;
 
 /
 
--- 2.2. Remplissage avec les points des sommets de toutes les municipalités belges frontalières
+-- 2.2. Remplissage avec les points des sommets de toutes les municipalités belges
 SET SERVEROUTPUT ON
 DECLARE
     CURSOR C_1 IS
@@ -138,7 +142,34 @@ END;
 
 /
 
---3. Mise à jour de la géométrie et du fid_closest_point des points belges avec les infos des plus proches points français.
+-- 3. Suppression des points français situés en-dehors de la frontière avec la Belgique dans un rayon de 50m autour de cette dernière.
+DELETE FROM ta_test_points WHERE objectid IN (
+WITH
+v_regroupement AS (
+    SELECT
+        SDO_AGGR_UNION(
+            SDOAGGRTYPE(a.geom, 0.001)
+        ) AS geom
+    FROM
+        ta_test_limites_communes a
+    WHERE
+        a.geom IS NOT NULL
+        AND a.fid_source = 25
+    )
+
+SELECT
+    a.objectid
+FROM
+    ta_test_points a,
+    v_regroupement b
+WHERE
+    a.fid_source = 3
+    AND SDO_WITHIN_DISTANCE(a.geom, b.geom, 'distance = 50') <> 'TRUE'
+);
+
+/
+
+--4. Mise à jour de la géométrie et du fid_closest_point des points belges avec les infos des plus proches points français.
 SET SERVEROUTPUT ON
 DECLARE
     CURSOR C_1 IS
